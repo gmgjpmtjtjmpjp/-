@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<title>オートエイム + オートクリック</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  :root{--accent:#e53935;--ok:#43a047;}
+  body{font-family:system-ui,-apple-system,Meiryo,Arial;padding:18px;background:#f5f7fb;color:#111}
+  .panel{max-width:980px;margin:0 auto;background:#fff;border-radius:10px;padding:14px;box-shadow:0 6px 20px rgba(0,0,0,.08)}
+  h2{margin:0 0 8px 0}
+  .controls{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+  button{padding:8px 12px;border-radius:8px;border:1px solid #cbd5e1;background:#fff;cursor:pointer}
+  button.primary{background:var(--accent);color:#fff;border:none}
+  label{font-size:13px;color:#555}
+  .muted{font-size:13px;color:#666;margin-top:8px}
+  .demo-area{margin:12px 0;padding:8px;background:#fbfdff;border-radius:8px;border:1px solid #e6eef8}
+  .aimable{display:inline-block;padding:8px 12px;margin:8px;border-radius:8px;background:#e3f2fd;border:1px solid #b3e5fc;cursor:pointer}
+  #aimHandle{
+    position:fixed; left:50%; top:50%; transform:translate(-50%,-50%);
+    width:36px;height:36px;border-radius:50%; background:rgba(255,255,255,0.95);
+    border:2px solid var(--accent); box-shadow:0 6px 18px rgba(0,0,0,.18);
+    display:none; z-index:99998; touch-action:none; display:flex;align-items:center;justify-content:center;
+  }
+  #aimHandle .plus{position:relative;width:18px;height:18px}
+  #aimHandle .plus::before,#aimHandle .plus::after{content:"";position:absolute;background:var(--accent);left:50%;top:50%;transform:translate(-50%,-50%); border-radius:2px}
+  #aimHandle .plus::before{width:2px;height:18px}
+  #aimHandle .plus::after{width:18px;height:2px}
+  #customCursor{
+    position:fixed;width:14px;height:14px;border-radius:50%;background:var(--accent);
+    transform:translate(-50%,-50%);box-shadow:0 0 12px rgba(229,57,53,0.6);pointer-events:none;display:none;z-index:99999;
+  }
+  .highlighted{outline:3px solid rgba(255,193,7,0.95);outline-offset:6px;border-radius:8px}
+  .status{margin-top:10px;font-size:13px;color:#444}
+  .small{font-size:13px;color:#666}
+  .switch{display:inline-flex;align-items:center;gap:6px}
+  input[type=number]{width:90px;padding:6px;border-radius:6px;border:1px solid #cfd8e3}
+</style>
+</head>
+<body>
+<div class="panel">
+  <h2>オートエイム + オートクリック</h2>
+
+  <div class="controls">
+    <button id="startAim" class="primary">オートエイム開始</button>
+    <button id="stopAim">停止（照準消去）</button>
+    <button id="startAutoClick">オートクリック開始</button>
+    <button id="stopAutoClick">オートクリック停止</button>
+    <label class="switch">感度(px): <input id="threshold" type="number" value="60"></label>
+    <label class="switch">最大距離(px): <input id="maxdist" type="number" value="240"></label>
+    <label class="switch">間隔(ms): <input id="clickInterval" type="number" value="200"></label>
+    <label class="switch">ジッター(px): <input id="clickJitter" type="number" value="3"></label>
+  </div>
+
+  <div class="muted">使い方：<strong>オートエイム開始</strong> → プラスをドラッグして動かす（または画面をタップ）→ タップ/Spaceでクリック。オートクリックを開始すると照準の位置の要素を連打します。</div>
+
+  <div class="demo-area" id="demoArea">
+    <!-- サンプル狙える要素 -->
+    <button class="aimable">ボタン A</button>
+    <button class="aimable">ボタン B</button>
+    <a class="aimable" href="https://example.com" target="_blank">リンク C</a>
+    <div class="aimable" tabindex="0">カード D</div>
+    <button class="aimable">ボタン E</button>
+    <button class="aimable">ボタン F</button>
+    <div style="height:200px"></div>
+    <button class="aimable">最後のボタン</button>
+  </div>
+
+  <div class="status">
+    <span id="stateText">状態：停止中</span>　|　ターゲット：<span id="targetName">なし</span>　|　クリック数：<span id="clickCount">0</span>
+  </div>
+
+  <div class="muted" style="margin-top:8px">注意：ページ外や別タブには影響しません。利用は節度を守ってください。</div>
+</div>
+
+<div id="aimHandle" role="button" aria-label="照準">
+  <div class="plus" aria-hidden="true"></div>
+</div>
+<div id="customCursor" aria-hidden="true"></div>
+
+<script>
+(function(){
+  const startAim = document.getElementById('startAim');
+  const stopAim = document.getElementById('stopAim');
+  const startAutoClick = document.getElementById('startAutoClick');
+  const stopAutoClick = document.getElementById('stopAutoClick');
+  const aimHandle = document.getElementById('aimHandle');
+  const customCursor = document.getElementById('customCursor');
+  const thresholdInput = document.getElementById('threshold');
+  const maxdistInput = document.getElementById('maxdist');
+  const clickIntervalInput = document.getElementById('clickInterval');
+  const clickJitterInput = document.getElementById('clickJitter');
+  const stateText = document.getElementById('stateText');
+  const targetName = document.getElementById('targetName');
+  const clickCountEl = document.getElementById('clickCount');
+
+  let enabled = false;
+  let dragging = false;
+  let offset = {x:0,y:0};
+  let aimPos = {x: window.innerWidth/2, y: window.innerHeight/2};
+  let aimTarget = null;
+  let clickCount = 0;
+
+  let autoClickTimer = null;
+
+  function aimables(){ return Array.from(document.querySelectorAll('.aimable')); }
+
+  function showAim(){ aimHandle.style.display = 'flex'; customCursor.style.display = 'block'; updateState('照準表示'); }
+  function hideAim(){ aimHandle.style.display = 'none'; customCursor.style.display = 'none'; updateState('停止中'); clearHighlight(); }
+
+  function updateState(s){ stateText.textContent = '状態：' + s; }
+
+  function centerOf(el){
+    const r = el.getBoundingClientRect();
+    return {x: r.left + r.width/2, y: r.top + r.height/2};
+  }
+
+  function findNearest(x,y){
+    const maxd = Number(maxdistInput.value) || 240;
+    let best = null, bestDist = Infinity;
+    aimables().forEach(el=>{
+      const c = centerOf(el);
+      const d = Math.hypot(c.x - x, c.y - y);
+      if(d < bestDist && d <= maxd){ bestDist = d; best = {el,dist:d,center:c}; }
+    });
+    return best;
+  }
+
+  function clearHighlight(){
+    if(aimTarget && aimTarget.el) aimTarget.el.classList.remove('highlighted');
+    aimTarget = null;
+    targetName.textContent = 'なし';
+  }
+
+  function highlightTarget(t){
+    clearHighlight();
+    if(!t) return;
+    t.el.classList.add('highlighted');
+    aimTarget = t;
+    targetName.textContent = t.el.textContent ? t.el.textContent.trim().slice(0,30) : (t.el.tagName || '要素');
+  }
+
+  function updateCursorPosition(x,y){
+    customCursor.style.left = x + 'px';
+    customCursor.style.top = y + 'px';
+  }
+
+  function updateAimPosition(x,y){
+    aimPos.x = x; aimPos.y = y;
+    aimHandle.style.left = x + 'px';
+    aimHandle.style.top = y + '
